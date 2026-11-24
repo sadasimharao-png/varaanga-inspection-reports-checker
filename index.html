@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Varaanga Engineers - Inspection Checker</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth/mammoth.browser.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,sans-serif;background:#f3f5f8;color:#202b3c}
+header{background:#142d4e;color:white;padding:25px 18px}
+header h1{font-size:22px;margin:0 0 8px}
+header p{margin:0;color:#dce6f2;font-size:14px}
+main{max-width:950px;margin:22px auto;padding:0 14px}
+.card{background:white;padding:20px;margin-bottom:18px;border-radius:12px;box-shadow:0 2px 9px #00000012}
+h2{font-size:19px;margin-top:0}
+label{display:block;font-weight:bold;margin:15px 0 8px}
+input[type=file]{width:100%;padding:12px;border:1px solid #ccd4df;border-radius:8px;background:#fafafa}
+button{border:0;border-radius:8px;padding:13px 18px;background:#1764a5;color:white;font-weight:bold;font-size:15px;margin:10px 6px 0 0}
+button:disabled{opacity:.5}
+.secondary{background:#526579}
+.status{padding:12px;background:#edf4fb;border-radius:8px;margin-top:14px;font-size:14px}
+.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:10px;border:1px solid #dce2e9;text-align:left;vertical-align:top}
+th{background:#eaf0f7}
+footer{text-align:center;color:#687789;padding:20px;font-size:12px}
+.small{font-size:13px;color:#637184;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+<h1>VARAANGA ENGINEERS</h1>
+<p>INSPECTION REPORTS CHECKER</p>
+</header>
+
+<main>
+<div class="card">
+<h2>Document Upload</h2>
+<p class="small">Upload your Excel inspection summary and corresponding Word inspection reports.</p>
+
+<label>1. Excel Summary (.xlsx)</label>
+<input type="file" id="excelFile" accept=".xlsx,.xlsm">
+
+<label>2. Word Inspection Reports (.docx)</label>
+<input type="file" id="wordFiles" accept=".docx" multiple>
+
+<button id="checkBtn" onclick="checkReports()">Check Documents</button>
+<button class="secondary" onclick="clearAll()">Clear</button>
+<div class="status" id="status">Waiting for documents.</div>
+</div>
+
+<div class="card">
+<h2>Inspection Checking Results</h2>
+<p class="small">Findings are for human review only. This application does not approve or certify equipment.</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>Report</th>
+<th>Field</th>
+<th>Excel Value</th>
+<th>Word Value</th>
+<th>Finding</th>
+</tr>
+</thead>
+<tbody id="results">
+<tr><td colspan="5">No checking completed yet.</td></tr>
+</tbody>
+</table>
+</div>
+<button id="downloadBtn" onclick="downloadCSV()" disabled>Download CSV Findings</button>
+</div>
+
+<div class="card">
+<h2>Important Notice</h2>
+<p class="small">This is an initial checking tool. It may miss information because inspection reports can have different layouts and formats. A competent person must verify every finding and independently review all inspection documents before making any decision.</p>
+</div>
+</main>
+
+<footer>Varaanga Engineers | Inspection Reports Checker | Version 1.0</footer>
+
+<script>
+let findings=[];
+
+function clean(value){
+ return String(value??"").trim().toLowerCase().replace(/\s+/g," ");
+}
+
+function getValue(row,terms){
+ const keys=Object.keys(row);
+ for(const term of terms){
+  const key=keys.find(k=>clean(k).includes(term));
+  if(key && row[key]!==undefined && row[key]!==null && String(row[key]).trim()!==""){
+   return String(row[key]).trim();
+  }
+ }
+ return "";
+}
+
+function normalizeReport(value){
+ return clean(value).replace(/[^a-z0-9]/g,"");
+}
+
+function extractReportNumber(text){
+ const patterns=[
+  /report\s*(?:no|number|#)\s*[:\-]?\s*([A-Z0-9\/\-]+)/i,
+  /certificate\s*(?:no|number)\s*[:\-]?\s*([A-Z0-9\/\-]+)/i
+ ];
+ for(const p of patterns){
+  const m=text.match(p);
+  if(m)return m[1].trim();
+ }
+ return "";
+}
+
+function findWordValue(text,labels){
+ for(const label of labels){
+  const escaped=label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const re=new RegExp(escaped+"\\s*[:\\-]?\\s*([^\\n\\r]{1,70})","i");
+  const m=text.match(re);
+  if(m)return m[1].trim();
+ }
+ return "";
+}
+
+function addFinding(report,field,excel,word,message){
+ findings.push({report,field,excel,word,message});
+}
+
+async function checkReports(){
+ const excel=document.getElementById("excelFile").files[0];
+ const files=[...document.getElementById("wordFiles").files];
+ const status=document.getElementById("status");
+ const body=document.getElementById("results");
+
+ if(!excel || files.length===0){
+  status.textContent="Please select one Excel file and at least one Word .docx report.";
+  return;
+ }
+
+ if(!window.XLSX || !window.mammoth){
+  status.textContent="Could not load the document libraries. Check your internet connection and reload the page.";
+  return;
+ }
+
+ findings=[];
+ status.textContent="Reading Excel summary and Word reports...";
+ body.innerHTML="";
+ document.getElementById("checkBtn").disabled=true;
+
+ try{
+  const buffer=await excel.arrayBuffer();
+  const workbook=XLSX.read(buffer,{type:"array"});
+  const sheet=workbook.Sheets[workbook.SheetNames[0]];
+  const rows=XLSX.utils.sheet_to_json(sheet,{defval:""});
+
+  if(rows.length===0)throw new Error("The first Excel sheet has no data.");
+
+  let matched=0;
+
+  for(const file of files){
+   const docBuffer=await file.arrayBuffer();
+   const result=await mammoth.extractRawText({arrayBuffer:docBuffer});
+   const text=result.value||"";
+   const reportNo=extractReportNumber(text);
+   const excelRow=rows.find(row=>{
+    const number=getValue(row,["report no","report number","certificate no","certificate number"]);
+    return number && normalizeReport(number)===normalizeReport(reportNo);
+   });
+
+   if(!reportNo){
+    addFinding(file.name,"Report number","","","Could not identify report number. Manual review required.");
+    continue;
+   }
+
+   if(!excelRow){
+    addFinding(reportNo,"Excel matching","","","No matching report number found in Excel summary.");
+    continue;
+   }
+
+   matched++;
+
+   const checks=[
+    {field:"Serial number",terms:["serial no","serial number"],labels:["serial no","serial number"]},
+    {field:"Quantity",terms:["quantity","qty"],labels:["quantity","qty"]},
+    {field:"Capacity",terms:["capacity","working pressure"],labels:["capacity","working pressure"]},
+    {field:"Size / Thread",terms:["thread size","size","bolt size"],labels:["thread size","bolt size","size"]},
+    {field:"Location",terms:["location","department","area"],labels:["location","department","area"]},
+    {field:"Inspection date",terms:["inspection date","date of inspection"],labels:["inspection date","date of inspection"]},
+    {field:"Validity date",terms:["validity date","valid up to","next inspection"],labels:["validity date","valid up to","next inspection"]}
+   ];
+
+   for(const item of checks){
+    const ev=getValue(excelRow,item.terms);
+    const wv=findWordValue(text,item.labels);
+
+    if(!ev && !wv)continue;
+
+    if(!ev || !wv){
+     addFinding(reportNo,item.field,ev,wv,"Information missing in one document. Review required.");
+    }else if(clean(ev)!==clean(wv)){
+     addFinding(reportNo,item.field,ev,wv,"Possible mismatch. Human verification required.");
+    }
+   }
+  }
+
+  if(findings.length===0){
+   addFinding("All uploaded reports","Initial comparison","","","No differences detected by the basic checks. This is not proof that the documents are correct.");
+  }
+
+  body.innerHTML=findings.map(f=>`
+   <tr>
+    <td>${escapeHTML(f.report)}</td>
+    <td>${escapeHTML(f.field)}</td>
+    <td>${escapeHTML(f.excel)}</td>
+    <td>${escapeHTML(f.word)}</td>
+    <td>${escapeHTML(f.message)}</td>
+   </tr>`).join("");
+
+  status.textContent="Checking completed. Word reports matched to Excel: "+matched+". Findings requiring review: "+findings.length+".";
+  document.getElementById("downloadBtn").disabled=false;
+
+ }catch(error){
+  status.textContent="Error: "+error.message;
+ }finally{
+  document.getElementById("checkBtn").disabled=false;
+ }
+}
+
+function escapeHTML(value){
+ return String(value??"").replace(/[&<>"']/g,c=>({
+ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+ }[c]));
+}
+
+function downloadCSV(){
+ if(!findings.length)return;
+ const columns=["Report","Field","Excel Value","Word Value","Finding"];
+ const rows=findings.map(f=>[f.report,f.field,f.excel,f.word,f.message]);
+ const csv=[columns,...rows].map(row=>row.map(v=>'"'+String(v??"").replace(/"/g,'""')+'"').join(",")).join("\r\n");
+ const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement("a");
+ a.href=url;
+ a.download="Varaanga_Inspection_Findings.csv";
+ a.click();
+ URL.revokeObjectURL(url);
+}
+
+function clearAll(){
+ document.getElementById("excelFile").value="";
+ document.getElementById("wordFiles").value="";
+ document.getElementById("results").innerHTML='<tr><td colspan="5">No checking completed yet.</td></tr>';
+ document.getElementById("status").textContent="Waiting for documents.";
+ document.getElementById("downloadBtn").disabled=true;
+ findings=[];
+}
+</script>
+</body>
+</html>
+
+HTML
